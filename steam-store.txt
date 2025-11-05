@@ -1,0 +1,10 @@
+payload:
+  - 'fanatical.com'
+  - 'humblebundle.com'
+  - 'steamcommunity.com'
+  - 'steampowered.com'
+  - 'steamstatic.com'
+  - 'steam-chat.com'
+  - 'steamusercontent.com'
+  - 'valvesoftware.com'
+  
