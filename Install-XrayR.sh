@@ -65,15 +65,15 @@ install_base() {
 
 update_geo_files() {
     echo -e "${yellow}正在更新 Geo 文件...${plain}"
-    wget -O /etc/XrayR/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && \
-    wget -O /etc/XrayR/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+    wget -O /etc/XrayR/geoip.dat https://proxy.shuiqiang.xyz/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && \
+    wget -O /etc/XrayR/geosite.dat https://proxy.shuiqiang.xyz/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
     echo -e "${green}Geo 文件更新完成${plain}"
 }
 
 setup_cron_update() {
     echo -e "${yellow}设置定时任务：每天凌晨六点更新 Geo 文件${plain}"
     cat > /etc/cron.d/xrayr-geo-update <<EOF
-0 6 * * * root wget -O /etc/XrayR/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && wget -O /etc/XrayR/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+0 6 * * * root wget -O /etc/XrayR/geoip.dat https://proxy.shuiqiang.xyz/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat && wget -O /etc/XrayR/geosite.dat https://proxy.shuiqiang.xyz/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
 EOF
     systemctl restart cron
     echo -e "${green}定时任务已添加并生效${plain}"
@@ -84,17 +84,17 @@ install_XrayR() {
     mkdir -p /usr/local/XrayR/
     cd /usr/local/XrayR/
 
-    last_version=$(curl -Ls "https://api.github.com/repos/XrayR-project/XrayR/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    last_version=$(curl -Ls "https://proxy.shuiqiang.xyz/https://api.github.com/repos/XrayR-project/XrayR/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [[ -z "$last_version" ]] && echo -e "${red}检测 XrayR 版本失败${plain}" && exit 1
 
     echo -e "检测到最新版本：${last_version}，开始安装"
-    wget -q -N --no-check-certificate -O XrayR-linux.zip https://github.com/XrayR-project/XrayR/releases/download/${last_version}/XrayR-linux-${arch}.zip || { echo -e "${red}下载失败${plain}"; exit 1; }
+    wget -q -N --no-check-certificate -O XrayR-linux.zip https://proxy.shuiqiang.xyz/https://github.com/XrayR-project/XrayR/releases/download/${last_version}/XrayR-linux-${arch}.zip || { echo -e "${red}下载失败${plain}"; exit 1; }
 
     unzip XrayR-linux.zip
     rm -f XrayR-linux.zip
     chmod +x XrayR
     mkdir -p /etc/XrayR/
-    wget -q -N --no-check-certificate -O /etc/systemd/system/XrayR.service https://github.com/XrayR-project/XrayR-release/raw/master/XrayR.service
+    wget -q -N --no-check-certificate -O /etc/systemd/system/XrayR.service https://proxy.shuiqiang.xyz/https://github.com/XrayR-project/XrayR-release/raw/master/XrayR.service
 
     systemctl daemon-reload
     systemctl enable XrayR
@@ -110,7 +110,7 @@ install_XrayR() {
     cp -n custom_inbound.json /etc/XrayR/
     cp -n rulelist /etc/XrayR/
 
-    curl -o /usr/bin/XrayR -Ls https://raw.githubusercontent.com/XrayR-project/XrayR-release/master/XrayR.sh
+    curl -o /usr/bin/XrayR -Ls https://proxy.shuiqiang.xyz/https://raw.githubusercontent.com/XrayR-project/XrayR-release/master/XrayR.sh
     chmod +x /usr/bin/XrayR
     ln -sf /usr/bin/XrayR /usr/bin/xrayr
 
