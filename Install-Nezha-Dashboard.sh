@@ -53,8 +53,9 @@ install_acme_deps
 # 2. 用户输入
 # -------------------------------
 read -p "请输入项目目录 (默认: Nezha-Dashboard): " PROJECT_DIR
-PROJECT_DIR=${PROJECT_DIR:-Nezha-Dashboard}
-PROJECT_DIR=$(realpath $PROJECT_DIR)   # 转换为绝对路径
+PROJECT_DIR=${PROJECT_DIR:-/etc/Nezha-Dashboard}
+PROJECT_DIR=$(realpath $PROJECT_DIR)
+
 
 read -p "请输入绑定的域名 (必填): " DOMAIN
 if [ -z "$DOMAIN" ]; then
@@ -158,7 +159,7 @@ services:
     ports:
       - "8008:8008"
     volumes:
-      - ./data:/dashboard/data
+      - $PROJECT_DIR/data:/dashboard/data
 
   nginx:
     image: nginx:latest
@@ -168,10 +169,11 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
-      - ./cert/cert.crt:/etc/nginx/certs/cert.crt:ro
-      - ./cert/private.key:/etc/nginx/certs/private.key:ro
+      - $PROJECT_DIR/nginx.conf:/etc/nginx/conf.d/default.conf
+      - $PROJECT_DIR/cert/cert.crt:/etc/nezha/cert/cert.crt:ro
+      - $PROJECT_DIR/cert/private.key:/etc/nezha/cert/private.key:ro
 EOF
+
 
 # -------------------------------
 # 9. 生成 nginx.conf
@@ -190,8 +192,8 @@ server {
     server_name $DOMAIN;
 
     # SSL 配置
-    ssl_certificate     /etc/nginx/certs/cert.crt;
-    ssl_certificate_key /etc/nginx/certs/private.key;
+    ssl_certificate     /etc/nezha/cert/cert.crt;
+    ssl_certificate_key /etc/nezha/cert/private.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_cache shared:SSL:50m;
     ssl_session_timeout 1d;
