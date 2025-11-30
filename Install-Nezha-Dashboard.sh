@@ -182,29 +182,51 @@ cat > nginx.conf <<EOF
 upstream dashboard {
     server nezha-dashboard:8008;
     keepalive 1024;
+    keepalive_requests 10000;
+    keepalive_timeout 3600s;
 }
 
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    http2 on;
+    http2 on;                     # 官方推荐写法，无警告
 
-    server_name $DOMAIN;
+    server_name stats.shuiqiang.xyz;
 
-    # SSL 配置
+    # ==================== 解决 wallhaven + Chrome unknown address space ====================
+    add_header Cross-Origin-Resource-Policy cross-origin always;
+    add_header Access-Control-Allow-Private-Network true always;
+    add_header Cross-Origin-Embedder-Policy credentialless always;
+
+    # SSL 极致配置（兼容性+速度双满）
     ssl_certificate     /etc/nezha/cert/cert.crt;
     ssl_certificate_key /etc/nezha/cert/private.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_session_cache shared:SSL:50m;
-    ssl_session_timeout 1d;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache   shared:SSL:100m;
+    ssl_session_timeout 4h;
+    ssl_session_tickets off;
+
+    # HSTS
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
 
     underscores_in_headers on;
 
-    # Cloudflare 或其他反代的真实 IP
+    # Cloudflare 真实 IP
     real_ip_header CF-Connecting-IP;
     set_real_ip_from 0.0.0.0/0;
 
-    # gRPC
+    # 静态资源超强缓存（官方镜像兼容版）
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|woff2|ttf|svg|webp|avif|wasm)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable, max-age=31536000";
+        access_log off;
+        log_not_found off;
+        proxy_pass http://dashboard;
+    }
+
+    # gRPC（哪吒核心通信）
     location ^~ /proto.NezhaService/ {
         grpc_set_header Host $host;
         grpc_set_header nz-realip $http_cf_connecting_ip;
@@ -212,11 +234,12 @@ server {
         grpc_send_timeout 600s;
         grpc_socket_keepalive on;
         client_max_body_size 20m;
-        grpc_buffer_size 8m;
+        grpc_buffer_size 16m;
+        proxy_buffering off;
         grpc_pass grpc://dashboard;
     }
 
-    # WebSocket
+    # WebSocket（终端、文件传输）
     location ~* ^/api/v1/ws/(server|terminal|file)(.*)$ {
         proxy_set_header Host $host;
         proxy_set_header nz-realip $http_cf_connecting_ip;
@@ -226,10 +249,11 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+        proxy_http_version 1.1;
         proxy_pass http://dashboard;
     }
 
-    # Web
+    # 主入口
     location / {
         proxy_set_header Host $host;
         proxy_set_header nz-realip $http_cf_connecting_ip;
@@ -237,21 +261,20 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
 
-        proxy_buffer_size 128k;
-        proxy_buffers 8 256k;
-        proxy_busy_buffers_size 512k;
+        proxy_buffer_size 256k;
+        proxy_buffers 8 512k;
+        proxy_busy_buffers_size 1024k;
         proxy_max_temp_file_size 0;
 
         proxy_pass http://dashboard;
     }
 }
 
+# HTTP → HTTPS 强制跳转
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
-
-    # 自动跳转到 HTTPS
+    server_name stats.shuiqiang.xyz;
     return 301 https://$host$request_uri;
 }
 EOF
