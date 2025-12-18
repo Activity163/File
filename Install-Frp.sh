@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# FRP 一键安装脚本 (Debian 12, amd64 架构)
+# FRP 一键安装/卸载脚本 (Debian 12, amd64 架构)
 # 版本: frp 0.65.0
 # 作者: Grok (基于用户需求手搓)
 # 使用前请确保系统为 Debian 12 或兼容系统，且有 root 权限
@@ -14,7 +14,64 @@ URL="https://github.com/fatedier/frp/releases/download/v${VERSION}/${PACKAGE}"
 INSTALL_DIR="/etc/frp"
 TMP_DIR="/tmp/frp_install"
 
-# 主函数
+# 清理函数
+cleanup() {
+  cd /
+  rm -rf "$TMP_DIR"
+}
+
+# 卸载函数
+uninstall() {
+  clear
+  echo "========================================"
+  echo "    FRP 一键卸载"
+  echo "========================================"
+
+  if [ "$EUID" -ne 0 ]; then
+    echo "错误: 请以 root 权限运行卸载 (sudo bash $0 --uninstall)"
+    exit 1
+  fi
+
+  echo "正在停止并禁用可能的 FRP 服务..."
+  for service in frps frpc; do
+    if systemctl is-active --quiet ${service}.service; then
+      systemctl stop ${service}.service
+      echo "已停止 ${service}.service"
+    fi
+    if systemctl is-enabled --quiet ${service}.service; then
+      systemctl disable ${service}.service
+      echo "已禁用 ${service}.service"
+    fi
+    if [ -f "/etc/systemd/system/${service}.service" ]; then
+      rm -f "/etc/systemd/system/${service}.service"
+      echo "已删除 /etc/systemd/system/${service}.service"
+    fi
+  done
+
+  systemctl daemon-reload
+
+  if [ -d "$INSTALL_DIR" ]; then
+    echo "正在删除安装目录 $INSTALL_DIR ..."
+    rm -rf "$INSTALL_DIR"
+    echo "已删除 $INSTALL_DIR"
+  else
+    echo "$INSTALL_DIR 不存在，无需删除。"
+  fi
+
+  echo ""
+  echo "========================================"
+  echo "FRP 卸载完成！"
+  echo "所有服务、配置文件和二进制文件已移除。"
+  echo "========================================"
+  exit 0
+}
+
+# 检查是否为卸载模式
+if [ "$1" = "--uninstall" ] || [ "$1" = "-u" ]; then
+  uninstall
+fi
+
+# 主安装函数
 main() {
   clear
   echo "========================================"
@@ -123,6 +180,9 @@ EOF
   echo "    sudo systemctl status ${SERVICE}   # 查看状态"
   echo "    sudo journalctl -u ${SERVICE} -f   # 查看日志"
   echo ""
+  echo "卸载命令:"
+  echo "    sudo bash $0 --uninstall   # 或 sudo bash $0 -u"
+  echo ""
   if [ "$MODE" = "server" ]; then
     echo "提示: 服务端默认 frps.toml 配置较简单，请至少设置 bindPort、token 等参数。"
   else
@@ -134,11 +194,5 @@ EOF
   echo "临时文件已清理，脚本执行完毕。"
 }
 
-# 清理函数
-cleanup() {
-  cd /
-  rm -rf "$TMP_DIR"
-}
-
-# 执行主函数
+# 执行主安装函数
 main
