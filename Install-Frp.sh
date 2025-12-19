@@ -10,7 +10,7 @@ set -e  # 遇到错误立即退出
 VERSION="0.65.0"
 ARCH="amd64"
 PACKAGE="frp_${VERSION}_linux_${ARCH}.tar.gz"
-URL="https://github.com/fatedier/frp/releases/download/v${VERSION}/${PACKAGE}"
+URL="https://js.peiqi.mom/https://github.com/fatedier/frp/releases/download/v${VERSION}/${PACKAGE}"
 INSTALL_DIR="/etc/frp"
 TMP_DIR="/tmp/frp_install"
 
