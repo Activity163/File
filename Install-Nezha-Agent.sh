@@ -81,7 +81,7 @@ ipv6_check() {
 
     if [ "$has_ipv6" = true ] && [ "$has_ipv4" = false ]; then
         IPV6_ONLY=true
-        info "Detected IPv6 Only environment, will use proxy https://proxy.shuiqiang.xyz/"
+        info "Detected IPv6 Only environment, will use proxy https://proxy.peiqi.lol//"
     fi
 }
 
@@ -139,7 +139,7 @@ install() {
 
     # 如果是 IPv6 Only → 使用代理
     if [ -n "$IPV6_ONLY" ]; then
-        NZ_AGENT_URL="https://proxy.shuiqiang.xyz/${NZ_AGENT_URL}"
+        NZ_AGENT_URL="https://proxy.peiqi.lol//${NZ_AGENT_URL}"
     fi
 
     if command -v wget >/dev/null 2>&1; then
