@@ -52,10 +52,9 @@ install_acme_deps
 # -------------------------------
 # 2. 用户输入
 # -------------------------------
-read -p "请输入项目目录 (默认: Nezha-Dashboard): " PROJECT_DIR
+read -p "请输入项目目录 (默认: /etc/Nezha-Dashboard): " PROJECT_DIR
 PROJECT_DIR=${PROJECT_DIR:-/etc/Nezha-Dashboard}
-PROJECT_DIR=$(realpath $PROJECT_DIR)
-
+PROJECT_DIR=$(realpath "$PROJECT_DIR")
 
 read -p "请输入绑定的域名 (必填): " DOMAIN
 if [ -z "$DOMAIN" ]; then
@@ -65,18 +64,11 @@ fi
 
 # 域名解析检测
 if command -v dig >/dev/null 2>&1; then
-  DOMAIN_IP=$(dig +short $DOMAIN | tail -n1)
+  DOMAIN_IP=$(dig +short "$DOMAIN" | tail -n1)
 else
-  DOMAIN_IP=$(getent hosts $DOMAIN | awk '{ print $1 }' | head -n1)
+  DOMAIN_IP=$(getent hosts "$DOMAIN" | awk '{ print $1 }' | head -n1)
 fi
 LOCAL_IP=$(curl -s ipv4.icanhazip.com)
-
-if [ "$DOMAIN_IP" != "$LOCAL_IP" ]; then
-  echo "错误: 域名解析IP ($DOMAIN_IP) 与本机IP ($LOCAL_IP) 不匹配！"
-  exit 1
-else
-  echo "✅ 域名解析正确: $DOMAIN -> $DOMAIN_IP"
-fi
 
 read -p "请输入邮箱 (留空则随机生成一个@gmail.com): " EMAIL
 if [ -z "$EMAIL" ]; then
@@ -90,11 +82,21 @@ echo "1) 80端口 standalone 模式"
 echo "2) Cloudflare DNS 模式"
 read -p "输入选项 (1/2): " MODE
 
+# standalone 模式才校验域名指向本机
+if [ "$MODE" == "1" ]; then
+  if [ "$DOMAIN_IP" != "$LOCAL_IP" ]; then
+    echo "错误: 域名解析IP ($DOMAIN_IP) 与本机IP ($LOCAL_IP) 不匹配！"
+    exit 1
+  else
+    echo "✅ 域名解析正确: $DOMAIN -> $DOMAIN_IP"
+  fi
+fi
+
 # -------------------------------
 # 3. 创建目录
 # -------------------------------
-mkdir -p $PROJECT_DIR/cert
-cd $PROJECT_DIR
+mkdir -p "$PROJECT_DIR/cert"
+cd "$PROJECT_DIR"
 
 # -------------------------------
 # 4. 安装 acme.sh
@@ -107,7 +109,7 @@ fi
 # -------------------------------
 # 5. 注册 ACME 账户
 # -------------------------------
-$HOME/.acme.sh/acme.sh --register-account -m $EMAIL || true
+"$HOME/.acme.sh/acme.sh" --register-account -m "$EMAIL" || true
 
 # -------------------------------
 # 6. 申请证书
@@ -120,29 +122,32 @@ if [ "$MODE" == "1" ]; then
   fi
 
   echo "使用 80端口 standalone 模式申请证书..."
-  $HOME/.acme.sh/acme.sh --issue --standalone -d $DOMAIN --force
+  "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --force
 
 elif [ "$MODE" == "2" ]; then
   echo "使用 Cloudflare DNS 模式申请证书..."
-  read -p "请输入 Cloudflare API Key: " CF_KEY
+  read -p "请输入 Cloudflare API Token: " CF_TOKEN
   read -p "请输入 Cloudflare 邮箱: " CF_EMAIL
 
-  export CF_Key="$CF_KEY"
+  export CF_Token="$CF_TOKEN"
   export CF_Email="$CF_EMAIL"
 
-  $HOME/.acme.sh/acme.sh --issue --dns dns_cf -d $DOMAIN --force
+  "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --force
+
+  # 清理凭证环境变量
+  unset CF_Token CF_Email
 else
   echo "错误: 无效选项"
   exit 1
 fi
 
 # -------------------------------
-# 7. 安装证书到项目目录 (绝对路径)
+# 7. 安装证书到项目目录
 # -------------------------------
-$HOME/.acme.sh/acme.sh --install-cert -d $DOMAIN \
-  --cert-file $PROJECT_DIR/cert/cert.crt \
-  --key-file $PROJECT_DIR/cert/private.key \
-  --fullchain-file $PROJECT_DIR/cert/fullchain.crt \
+"$HOME/.acme.sh/acme.sh" --install-cert -d "$DOMAIN" \
+  --cert-file "$PROJECT_DIR/cert/cert.crt" \
+  --key-file "$PROJECT_DIR/cert/private.key" \
+  --fullchain-file "$PROJECT_DIR/cert/fullchain.crt" \
   --reloadcmd "docker restart nezha-nginx || true"
 
 echo "证书已生成到: $PROJECT_DIR/cert/"
@@ -159,21 +164,32 @@ services:
     ports:
       - "8008:8008"
     volumes:
-      - $PROJECT_DIR/data:/dashboard/data
+      - ${PROJECT_DIR}/data:/dashboard/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   nginx:
     image: nginx:latest
     container_name: nezha-nginx
     restart: always
+    depends_on:
+      - nezha-dashboard
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - $PROJECT_DIR/nginx.conf:/etc/nginx/conf.d/default.conf
-      - $PROJECT_DIR/cert/cert.crt:/etc/nezha/cert/cert.crt:ro
-      - $PROJECT_DIR/cert/private.key:/etc/nezha/cert/private.key:ro
+      - ${PROJECT_DIR}/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ${PROJECT_DIR}/cert/fullchain.crt:/etc/nezha/cert/cert.crt:ro
+      - ${PROJECT_DIR}/cert/private.key:/etc/nezha/cert/private.key:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
-
 
 # -------------------------------
 # 9. 生成 nginx.conf
@@ -189,16 +205,16 @@ upstream dashboard {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    http2 on;                     # 官方推荐写法，无警告
+    http2 on;
 
-    server_name stats.shuiqiang.xyz;
+    server_name ${DOMAIN};
 
-    # ==================== 解决 wallhaven + Chrome unknown address space ====================
+    # 跨域头
     add_header Cross-Origin-Resource-Policy cross-origin always;
     add_header Access-Control-Allow-Private-Network true always;
     add_header Cross-Origin-Embedder-Policy credentialless always;
 
-    # SSL 极致配置（兼容性+速度双满）
+    # SSL 配置
     ssl_certificate     /etc/nezha/cert/cert.crt;
     ssl_certificate_key /etc/nezha/cert/private.key;
     ssl_protocols       TLSv1.2 TLSv1.3;
@@ -215,9 +231,23 @@ server {
 
     # Cloudflare 真实 IP
     real_ip_header CF-Connecting-IP;
-    set_real_ip_from 0.0.0.0/0;
+    set_real_ip_from 173.245.48.0/20;
+    set_real_ip_from 103.21.244.0/22;
+    set_real_ip_from 103.22.200.0/22;
+    set_real_ip_from 103.31.4.0/22;
+    set_real_ip_from 141.101.64.0/18;
+    set_real_ip_from 108.162.192.0/18;
+    set_real_ip_from 190.93.240.0/20;
+    set_real_ip_from 188.114.96.0/20;
+    set_real_ip_from 197.234.240.0/22;
+    set_real_ip_from 198.41.128.0/17;
+    set_real_ip_from 162.158.0.0/15;
+    set_real_ip_from 104.16.0.0/13;
+    set_real_ip_from 104.24.0.0/14;
+    set_real_ip_from 172.64.0.0/13;
+    set_real_ip_from 131.0.72.0/22;
 
-    # 静态资源超强缓存（官方镜像兼容版）
+    # 静态资源缓存
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|woff2|ttf|svg|webp|avif|wasm)$ {
         expires 1y;
         add_header Cache-Control "public, immutable, max-age=31536000";
@@ -226,10 +256,10 @@ server {
         proxy_pass http://dashboard;
     }
 
-    # gRPC（哪吒核心通信）
+    # gRPC（哪吒 Agent 通信）
     location ^~ /proto.NezhaService/ {
-        grpc_set_header Host $host;
-        grpc_set_header nz-realip $http_cf_connecting_ip;
+        grpc_set_header Host \$host;
+        grpc_set_header nz-realip \$http_cf_connecting_ip;
         grpc_read_timeout 600s;
         grpc_send_timeout 600s;
         grpc_socket_keepalive on;
@@ -241,10 +271,10 @@ server {
 
     # WebSocket（终端、文件传输）
     location ~* ^/api/v1/ws/(server|terminal|file)(.*)$ {
-        proxy_set_header Host $host;
-        proxy_set_header nz-realip $http_cf_connecting_ip;
-        proxy_set_header Origin https://$host;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header nz-realip \$http_cf_connecting_ip;
+        proxy_set_header Origin https://\$host;
+        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
@@ -255,9 +285,9 @@ server {
 
     # 主入口
     location / {
-        proxy_set_header Host $host;
-        proxy_set_header nz-realip $http_cf_connecting_ip;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header nz-realip \$http_cf_connecting_ip;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
 
@@ -274,8 +304,8 @@ server {
 server {
     listen 80;
     listen [::]:80;
-    server_name stats.shuiqiang.xyz;
-    return 301 https://$host$request_uri;
+    server_name ${DOMAIN};
+    return 301 https://\$host\$request_uri;
 }
 EOF
 
@@ -284,4 +314,10 @@ EOF
 # -------------------------------
 docker compose up -d
 
-echo "✅ 部署完成！访问地址: https://$DOMAIN"
+echo ""
+echo "========================================="
+echo "✅ 部署完成！"
+echo "   访问地址: https://${DOMAIN}"
+echo "   项目目录: ${PROJECT_DIR}"
+echo "   证书路径: ${PROJECT_DIR}/cert/"
+echo "========================================="
