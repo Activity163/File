@@ -70,6 +70,117 @@ ensure_project() {
   fi
 }
 
+# 判断目录是否适合删除：拒绝根目录、系统关键目录与层级过浅的路径
+is_safe_dir() {
+  local p="$1"
+  [ -n "$p" ] || return 1
+  case "$p" in
+    "/"|"//"|"/bin"|"/boot"|"/dev"|"/etc"|"/home"|"/lib"|"/lib64"|"/opt"|"/proc"|"/root"|"/run"|"/sbin"|"/srv"|"/sys"|"/tmp"|"/usr"|"/var") return 1 ;;
+  esac
+  # 至少两级路径，如 /etc/Nezha-Dashboard
+  case "${p#/}" in
+    */*) return 0 ;;
+    *)   return 1 ;;
+  esac
+}
+
+# 启动并开机自启服务（兼容无 systemd 环境）
+svc_enable_start() {
+  local svc="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable "$svc" >/dev/null 2>&1 || true
+    systemctl start  "$svc" >/dev/null 2>&1 || true
+  elif command -v service >/dev/null 2>&1; then
+    service "$svc" start >/dev/null 2>&1 || true
+  else
+    warn "未检测到 systemctl/service，请手动确保 $svc 已启动"
+  fi
+}
+
+# 检查 80 / 443 是否被占用
+check_ports() {
+  local p busy=0
+  for p in 80 443; do
+    if command -v ss >/dev/null 2>&1; then
+      ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$" && { error "端口 $p 已被占用"; busy=1; }
+    elif command -v lsof >/dev/null 2>&1; then
+      lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && { error "端口 $p 已被占用"; busy=1; }
+    elif command -v netstat >/dev/null 2>&1; then
+      netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$" && { error "端口 $p 已被占用"; busy=1; }
+    else
+      warn "无 ss/lsof/netstat，跳过端口检查"
+      return 0
+    fi
+  done
+  if [ "$busy" -eq 1 ]; then
+    warn "请先释放以上端口（停止占用服务或旧容器）后重试"
+    exit 1
+  fi
+  info "80 / 443 端口可用"
+}
+
+# 获取 Cloudflare IP 段（在线获取，失败回退内置），输出换行分隔
+get_cf_ranges() {
+  local list
+  list="$(curl -fsSL https://www.cloudflare.com/ips-v4 2>/dev/null || true)
+$(curl -fsSL https://www.cloudflare.com/ips-v6 2>/dev/null || true)"
+  if ! printf '%s' "$list" | grep -qE '^[0-9a-fA-F:.]+/[0-9]{1,3}$'; then
+    warn "无法在线获取 Cloudflare IP 段，使用内置列表" >&2
+    list="$(cat <<'BUILTIN'
+173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22
+2400:cb00::/32
+2606:4700::/32
+2803:f800::/32
+2405:b500::/32
+2405:8100::/32
+2a06:98c0::/29
+2c0f:f248::/32
+BUILTIN
+)"
+  fi
+  printf '%s\n' "$list" | grep -E '^[0-9a-fA-F:.]+/[0-9]{1,3}$' || true
+}
+
+# 让面板读取 nz-realip 头（不设置则在线用户/审计只显示代理 IP）
+# 注意：面板在 nz-realip 为空或非法时会让每个请求直接报错，因此反代必须恒传合法 IP
+setup_real_ip_header() {
+  local cfg="$PROJECT_DIR/data/config.yaml" i=0
+  while [ ! -f "$cfg" ] && [ "$i" -lt 20 ]; do
+    sleep 1; i=$((i + 1))
+  done
+  if [ ! -f "$cfg" ]; then
+    warn "未找到 $cfg"
+    echo "  请稍后在面板「系统设置 → 系统配置 → 前端真实 IP 请求头」中填: nz-realip"
+    return 0
+  fi
+
+  local changed=0
+  grep -q '^web_real_ip_header:' "$cfg" || { printf 'web_real_ip_header: nz-realip\n' >> "$cfg"; changed=1; }
+  grep -q '^agent_real_ip_header:' "$cfg" || { printf 'agent_real_ip_header: nz-realip\n' >> "$cfg"; changed=1; }
+
+  if [ "$changed" = 1 ]; then
+    info "已写入真实 IP 请求头配置，重启面板使其生效..."
+    docker restart nezha-dashboard >/dev/null 2>&1 || true
+    sleep 5
+  else
+    info "真实 IP 请求头配置已存在，跳过"
+  fi
+}
+
 # ============================================================
 #  Docker 安装
 # ============================================================
@@ -78,8 +189,7 @@ install_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     info "安装 Docker..."
     curl -fsSL https://get.docker.com | sh
-    systemctl enable docker
-    systemctl start docker
+    svc_enable_start docker
     info "Docker 安装完成"
   else
     info "Docker 已安装: $(docker --version)"
@@ -121,10 +231,10 @@ install_acme_deps() {
   if [ "$OS_TYPE" = "debian" ]; then
     apt-get update -qq
     apt-get install -y -qq curl wget socat cron openssl netcat-openbsd dnsutils lsof
-    systemctl enable cron && systemctl start cron
+    svc_enable_start cron
   elif [ "$OS_TYPE" = "redhat" ]; then
     yum install -y -q curl wget socat cronie openssl nmap-ncat bind-utils lsof
-    systemctl enable crond && systemctl start crond
+    svc_enable_start crond
   else
     warn "未知系统，请手动安装: curl wget socat cron openssl netcat dnsutils lsof"
   fi
@@ -139,6 +249,7 @@ install_caddy() {
   info "===== Caddy 模式 ====="
   echo ""
 
+  ensure_docker
   ask_project_dir
 
   read -p "请输入绑定的域名 (必填): " DOMAIN
@@ -149,19 +260,51 @@ install_caddy() {
   read -p "请输入邮箱 (可选，用于证书通知，留空跳过): " EMAIL
 
   echo ""
-  echo "是否通过 Cloudflare CDN 代理？"
-  echo "  1) 是  (使用 CF-Connecting-IP 获取真实 IP)"
-  echo "  2) 否  (Caddy 直接对外，使用 remote_host)"
-  read -p "请选择 [1/2] (默认 2): " CF_CHOICE
+  echo "反向代理真实 IP 获取方式："
+  echo "  1) Cloudflare CDN   (使用 client_ip，自动识别 CF-Connecting-IP)"
+  echo "  2) 直连             (Caddy 直接对外，使用 remote_host)"
+  echo "  3) 国内外分流       (CF + 第三方 CDN 混合回源，使用 client_ip)"
+  read -p "请选择 [1/2/3] (默认 2): " CF_CHOICE
   CF_CHOICE=${CF_CHOICE:-2}
 
-  if [ "$CF_CHOICE" = "1" ]; then
-    NZ_REALIP='{http.CF-Connecting-IP}'
-    info "已启用 Cloudflare CDN 配置"
-  else
-    NZ_REALIP='{remote_host}'
-    info "未使用 Cloudflare CDN"
-  fi
+  SERVERS_BLOCK=""
+  case "$CF_CHOICE" in
+    1)
+      NZ_REALIP='{client_ip}'
+      info "已启用 Cloudflare CDN 配置"
+      CF_RANGES="$(get_cf_ranges | tr '\n' ' ')"
+      SERVERS_BLOCK="
+	servers {
+		trusted_proxies static ${CF_RANGES}
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP X-Real-IP X-Forwarded-For
+	}"
+      ;;
+    2)
+      NZ_REALIP='{remote_host}'
+      info "未使用 CDN（直连）"
+      ;;
+    3)
+      NZ_REALIP='{client_ip}'
+      info "已启用国内外分流（多 CDN）配置"
+      CF_RANGES="$(get_cf_ranges | tr '\n' ' ')"
+      echo ""
+      echo "请粘贴第三方 CDN 的回源 IP 段（空格分隔，可留空稍后手动补）"
+      read -p "第三方 CDN 回源 IP 段: " TP_RANGES
+      TRUSTED_RANGES=$(printf '%s %s' "$CF_RANGES" "$TP_RANGES" | tr -s ' ' | sed 's/^ *//; s/ *$//')
+      if [ -z "$TP_RANGES" ]; then
+        warn "未提供第三方 CDN 回源段：其回源请求将取不到真实 IP（面板访客 IP 会显示为 CDN 节点）"
+      fi
+      SERVERS_BLOCK="
+	servers {
+		trusted_proxies static ${TRUSTED_RANGES}
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP X-Real-IP X-Forwarded-For
+	}"
+      ;;
+    *)
+      error "无效选项"; exit 1 ;;
+  esac
 
   # 覆盖检测
   if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
@@ -175,6 +318,13 @@ install_caddy() {
   mkdir -p "$PROJECT_DIR"/{data,caddy_data,caddy_config}
   cd "$PROJECT_DIR"
 
+  # 覆盖安装：先停旧容器释放 80/443
+  if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
+    info "停止旧容器以释放端口..."
+    $COMPOSE_CMD down --remove-orphans 2>/dev/null || true
+  fi
+  check_ports
+
   # ---- Caddyfile ----
   EMAIL_BLOCK=""
   if [ -n "$EMAIL" ]; then
@@ -183,7 +333,7 @@ install_caddy() {
 
   cat > Caddyfile <<EOF
 {
-${EMAIL_BLOCK}
+${EMAIL_BLOCK}${SERVERS_BLOCK}
 }
 
 ${DOMAIN} {
@@ -252,7 +402,9 @@ EOF
 
   # ---- 启动 ----
   info "正在拉取镜像并启动..."
-  docker compose up -d
+  $COMPOSE_CMD up -d
+
+  setup_real_ip_header
 
   echo ""
   echo -e "${BOLD}=========================================${NC}"
@@ -260,13 +412,25 @@ EOF
   echo -e "  访问地址  : ${CYAN}https://${DOMAIN}${NC}"
   echo -e "  反向代理  : Caddy (自动证书管理)"
   echo -e "  项目目录  : ${PROJECT_DIR}"
-  [ "$CF_CHOICE" = "1" ] && echo -e "  CDN       : Cloudflare 已开启"
+  case "$CF_CHOICE" in
+    1) echo -e "  CDN       : Cloudflare 已开启" ;;
+    3) echo -e "  CDN       : 国内外分流（CF + 第三方 CDN）" ;;
+  esac
   echo -e "${BOLD}=========================================${NC}"
   echo ""
   echo "提示:"
   echo "  1. 确保防火墙/安全组已放行 80 和 443 端口"
   echo "  2. Agent 对接地址: ${DOMAIN}:443 (开启 TLS)"
   echo "  3. Caddy 会自动申请和续期证书，无需手动干预"
+
+  if [ "$CF_CHOICE" = "3" ]; then
+    echo ""
+    warn "分流模式额外注意："
+    echo "  1. 第三方 CDN 多数不支持 gRPC 回源，哪吒 Agent 请改用"
+    echo "     不分流的地址（如 agent.${DOMAIN} 直接解析到源站 IP）。"
+    echo "  2. 建议证书改用 DNS-01 申请，避免 HTTP-01 被 CDN 拦截。"
+    echo "  3. 两个 CDN 均需把回源 Host 设为 ${DOMAIN}、回源 HTTPS:443。"
+  fi
 }
 
 # ============================================================
@@ -279,7 +443,17 @@ install_nginx() {
   echo ""
 
   install_acme_deps
+  ensure_docker
   ask_project_dir
+
+  # 覆盖检测（放在证书申请之前，避免白跑一次 acme 申请、浪费 LE 速率配额）
+  if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
+    warn "检测到已有 docker-compose.yml"
+    read -p "是否覆盖现有配置？[y/N]: " OVERWRITE
+    if [ "${OVERWRITE,,}" != "y" ]; then
+      info "已取消"; exit 0
+    fi
+  fi
 
   read -p "请输入绑定的域名 (必填): " DOMAIN
   if [ -z "$DOMAIN" ]; then
@@ -312,7 +486,7 @@ install_nginx() {
   read -p "请选择 [1/2] (默认 1): " CERT_MODE
   CERT_MODE=${CERT_MODE:-1}
 
-  mkdir -p "$PROJECT_DIR/cert"
+  mkdir -p "$PROJECT_DIR"/{data,cert}
 
   if [ "$CERT_MODE" = "1" ]; then
     # --- CA 选择 ---
@@ -353,14 +527,14 @@ install_nginx() {
         error "80 端口已被占用，请先停止占用服务"; exit 1
       fi
       info "standalone 模式申请中..."
-      "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --server "$ACME_SERVER" --force
+      "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$DOMAIN" --server "$ACME_SERVER"
 
     elif [ "$MODE" = "2" ]; then
       info "Cloudflare DNS 模式申请中..."
-      read -p "Cloudflare API Token : " CF_TOKEN
+      read -rs -p "Cloudflare API Token : " CF_TOKEN; echo ""
       read -p "Cloudflare 邮箱      : " CF_EMAIL
       export CF_Token="$CF_TOKEN" CF_Email="$CF_EMAIL"
-      "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --server "$ACME_SERVER" --force
+      "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$DOMAIN" --server "$ACME_SERVER"
       unset CF_Token CF_Email
     else
       error "无效选项"; exit 1
@@ -411,16 +585,14 @@ install_nginx() {
   ENABLE_CF=false
   [ "$CF_CDN" = "1" ] && ENABLE_CF=true
 
-  # 覆盖检测
-  if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
-    warn "检测到已有 docker-compose.yml"
-    read -p "是否覆盖现有配置？[y/N]: " OVERWRITE
-    if [ "${OVERWRITE,,}" != "y" ]; then
-      info "已取消"; exit 0
-    fi
-  fi
-
   cd "$PROJECT_DIR"
+
+  # 覆盖安装：先停旧容器释放 80/443
+  if [ -f "$PROJECT_DIR/docker-compose.yml" ]; then
+    info "停止旧容器以释放端口..."
+    $COMPOSE_CMD down --remove-orphans 2>/dev/null || true
+  fi
+  check_ports
 
   # ---- docker-compose.yml ----
   cat > docker-compose.yml <<EOF
@@ -459,33 +631,31 @@ EOF
 
   # ---- nginx.conf ----
   if [ "$ENABLE_CF" = true ]; then
-    read -r -d '' REAL_IP_CONF <<'BLOCK' || true
-    # Cloudflare 真实 IP
-    real_ip_header CF-Connecting-IP;
-    set_real_ip_from 173.245.48.0/20;
-    set_real_ip_from 103.21.244.0/22;
-    set_real_ip_from 103.22.200.0/22;
-    set_real_ip_from 103.31.4.0/22;
-    set_real_ip_from 141.101.64.0/18;
-    set_real_ip_from 108.162.192.0/18;
-    set_real_ip_from 190.93.240.0/20;
-    set_real_ip_from 188.114.96.0/20;
-    set_real_ip_from 197.234.240.0/22;
-    set_real_ip_from 198.41.128.0/17;
-    set_real_ip_from 162.158.0.0/15;
-    set_real_ip_from 104.16.0.0/13;
-    set_real_ip_from 104.24.0.0/14;
-    set_real_ip_from 172.64.0.0/13;
-    set_real_ip_from 131.0.72.0/22;
-BLOCK
-    NZ_REALIP='$http_cf_connecting_ip'
+    CF_IP_LIST="$(get_cf_ranges)"
+
+    REAL_IP_CONF="    # Cloudflare 真实 IP
+    real_ip_header CF-Connecting-IP;"
+    while IFS= read -r ip; do
+      [ -n "$ip" ] || continue
+      printf '%s' "$ip" | grep -qE '^[0-9a-fA-F:.]+/[0-9]{1,3}$' || continue
+      REAL_IP_CONF="${REAL_IP_CONF}
+    set_real_ip_from ${ip};"
+    done <<< "$CF_IP_LIST"
+    NZ_REALIP='$nz_realip'
+    MAP_BLOCK="map \$http_cf_connecting_ip \$nz_realip {
+    \"\"      \$remote_addr;
+    default \$http_cf_connecting_ip;
+}
+
+"
   else
     REAL_IP_CONF="    # Cloudflare 真实 IP (已关闭)"
     NZ_REALIP='$remote_addr'
+    MAP_BLOCK=""
   fi
 
   cat > nginx.conf <<EOF
-upstream dashboard {
+${MAP_BLOCK}upstream dashboard {
     server nezha-dashboard:8008;
     keepalive 1024;
     keepalive_requests 10000;
@@ -589,7 +759,9 @@ EOF
 
   # ---- 启动 ----
   info "正在拉取镜像并启动..."
-  docker compose up -d
+  $COMPOSE_CMD up -d
+
+  setup_real_ip_header
 
   echo ""
   echo -e "${BOLD}=========================================${NC}"
@@ -659,7 +831,11 @@ do_uninstall() {
   echo ""
   read -p "是否删除项目目录 ($PROJECT_DIR) 和所有数据？[y/N]: " DEL_DATA
   if [ "${DEL_DATA,,}" = "y" ]; then
-    rm -rf "$PROJECT_DIR"
+    if ! is_safe_dir "$PROJECT_DIR"; then
+      error "路径不安全，拒绝删除: $PROJECT_DIR"
+      exit 1
+    fi
+    rm -rf -- "$PROJECT_DIR"
     info "已删除: $PROJECT_DIR"
   else
     info "已保留项目目录: $PROJECT_DIR"
@@ -796,15 +972,17 @@ show_menu() {
 
 check_root
 detect_os
-show_menu
 
-case "$MAIN_CHOICE" in
-  1) install_docker; do_install ;;
-  2) do_uninstall ;;
-  3) do_update ;;
-  4) do_restart ;;
-  5) do_status ;;
-  6) do_logs ;;
-  0) echo "再见！"; exit 0 ;;
-  *) error "无效选项"; exit 1 ;;
-esac
+while true; do
+  show_menu
+  case "$MAIN_CHOICE" in
+    1) install_docker; do_install; break ;;
+    2) do_uninstall; break ;;
+    3) do_update; break ;;
+    4) do_restart; break ;;
+    5) do_status; break ;;
+    6) do_logs; break ;;
+    0) echo "再见！"; exit 0 ;;
+    *) error "无效选项，请重新选择"; continue ;;
+  esac
+done
